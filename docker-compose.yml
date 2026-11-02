@@ -1,4 +1,5 @@
-# Production-style stack: app (4 workers) + PostgreSQL (app database) + Redis (shared cache).
+# Local production-style stack: API (4 workers) + PostgreSQL (app database) + Redis (cache).
+# The image is API-only; run the front end separately. Hostinger VPS: docker-compose.prod.yml.
 #   cp .env.example .env    # fill in secrets (python scripts/generate_secrets.py)
 #   docker compose up -d --build
 # Put an HTTPS reverse proxy (nginx, Traefik, a cloud load balancer) in front of port 8000.

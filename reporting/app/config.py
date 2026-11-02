@@ -63,6 +63,8 @@ class Settings:
     embed_key: str | None = None
     public_url: str | None = None  # origin used in embed snippets, e.g. https://reports.example.com
     static_dir: Path | None = None
+    # False: API-only server behind a separately hosted front end (e.g. Vercel) at public_url
+    serve_frontend: bool = True
     data_dir: Path = field(default_factory=lambda: Path("data"))
     api_docs: bool = True
     max_body_bytes: int = 8 * 1024 * 1024
@@ -112,6 +114,7 @@ class Settings:
                 if o.strip()),
             static_dir=Path(static) if static else (default_static if default_static.exists()
                                                     else None),
+            serve_frontend=_bool("REPORTING_SERVE_FRONTEND", True),
             data_dir=data,
             api_docs=_bool("REPORTING_API_DOCS", not production),
             max_body_bytes=int(os.environ.get("REPORTING_MAX_BODY_BYTES", str(8 * 1024 * 1024))),
@@ -150,9 +153,11 @@ class Settings:
                     problems.append("REPORTING_PUBLIC_URL must use https:// in production")
                 if parts.path not in ("", "/") or parts.query:
                     problems.append("REPORTING_PUBLIC_URL must be an origin, without a path")
-            if self.static_dir is None or not Path(self.static_dir, "index.html").exists():
+            if self.serve_frontend and (self.static_dir is None
+                                        or not Path(self.static_dir, "index.html").exists()):
                 problems.append("The front end is not built (run scripts/build.ps1 or "
-                                "scripts/build.sh), or set REPORTING_STATIC_DIR")
+                                "scripts/build.sh), set REPORTING_STATIC_DIR, or set "
+                                "REPORTING_SERVE_FRONTEND=false when it is hosted elsewhere")
         if problems:
             raise ConfigError(problems)
 

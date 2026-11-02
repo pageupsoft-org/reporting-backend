@@ -25,6 +25,9 @@ def create_app_engine(url: str) -> Engine:
             cur.close()
 
         return engine
+    for plain in ("postgresql://", "postgres://"):  # bare URLs would pick psycopg2 (not installed)
+        if url.startswith(plain):
+            url = "postgresql+psycopg://" + url[len(plain):]
     return create_engine(url, pool_pre_ping=True, pool_recycle=1800, pool_size=5,
                          max_overflow=10)
 

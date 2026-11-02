@@ -31,3 +31,9 @@ def test_access_context():
 def test_validation_failed_default_issue():
     e = ValidationFailed("bad")
     assert e.issues[0].message == "bad"
+
+
+def test_app_engine_accepts_plain_postgres_urls():
+    from reporting.core.db import create_app_engine
+    for url in ("postgresql://u:p@db:5432/app", "postgres://u:p@db:5432/app"):
+        assert create_app_engine(url).dialect.driver == "psycopg"

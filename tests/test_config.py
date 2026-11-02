@@ -54,6 +54,18 @@ def test_production_valid(env, tmp_path):
         Settings.from_env()
 
 
+def test_production_api_only(env):
+    """Front end hosted elsewhere (Vercel): no local build needed."""
+    env.setenv("REPORTING_ENV", "production")
+    env.setenv("REPORTING_MASTER_KEY", KEY)
+    env.setenv("REPORTING_JWT_SECRET", "s" * 48)
+    env.setenv("REPORTING_APP_DB_URL", "postgresql+psycopg://u:p@db/reporting")
+    env.setenv("REPORTING_PUBLIC_URL", "https://reports.example.com")
+    env.setenv("REPORTING_STATIC_DIR", "/nonexistent")
+    env.setenv("REPORTING_SERVE_FRONTEND", "false")
+    assert not Settings.from_env().serve_frontend
+
+
 def test_env_file_is_loaded_without_overriding(env, tmp_path):
     (tmp_path / ".env").write_text("REPORTING_CACHE_TTL=42\nREPORTING_SESSION_TTL=99\n")
     env.setenv("REPORTING_SESSION_TTL", "7")

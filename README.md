@@ -221,6 +221,7 @@ module's factory function.
 | `REPORTING_CORS_ORIGINS` | unset | Comma-separated origins if the UI is served elsewhere |
 | `REPORTING_PUBLIC_URL` | request URL | Public origin used in embed snippets, e.g. `https://reports.example.com` |
 | `REPORTING_EMBED_KEY` | derived from the JWT secret | Key from which per-embed secrets are derived (changing it invalidates all embed secrets) |
+| `REPORTING_SERVE_FRONTEND` | `true` | `false` for an API-only server behind a separately hosted front end (Vercel) |
 
 ## Tests and checks
 

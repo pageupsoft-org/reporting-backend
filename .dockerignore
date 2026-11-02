@@ -12,8 +12,7 @@
 data
 tests
 docs
-frontend/node_modules
-frontend/dist
+frontend/
 .env
 .env.*
 *.md

@@ -1,0 +1,28 @@
+# Production on the Hostinger VPS (deployed by .github/workflows/deploy.yml).
+# The image is built by GitHub Actions and pulled from GHCR; the VPS needs no source code.
+# Secrets live on the VPS in /opt/report-tool-secret/prod.env (see DEPLOYMENT.md).
+# The app database is external PostgreSQL (REPORTING_APP_DB_URL in prod.env).
+# HTTPS: the VPS's existing reverse proxy forwards https://API_DOMAIN to 127.0.0.1:8081.
+services:
+  app:
+    image: ghcr.io/ritesh-pageup/reporting-backend:${IMAGE_TAG:-latest}
+    env_file: /opt/report-tool-secret/prod.env
+    environment:
+      REPORTING_ENV: production
+      REPORTING_SERVE_FRONTEND: "false"
+      REDIS_URL: redis://redis:6379/0
+      FORWARDED_ALLOW_IPS: "*"   # only the host's reverse proxy can reach the port below
+    ports:
+      - "127.0.0.1:8081:8000"   # the VPS's existing reverse proxy serves API_DOMAIN -> here
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped

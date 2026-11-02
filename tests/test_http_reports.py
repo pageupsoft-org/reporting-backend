@@ -196,6 +196,32 @@ def test_frame_headers(client, admin, report_id):
     assert app_page.headers["x-frame-options"] == "DENY"
 
 
+def test_embed_page_from_remote_front_end(tmp_path, monkeypatch):
+    """API-only server: the embed page comes from the front end's host, with our CSP."""
+    from reporting.app.routes import embeds
+    fetched = []
+
+    class Page:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"<html>remote embed</html>"
+
+    monkeypatch.setattr(embeds, "_remote_page", None)
+    monkeypatch.setattr(embeds.urllib.request, "urlopen",
+                        lambda url, timeout: fetched.append(url) or Page())
+    settings = Settings(app_db_url=f"sqlite:///{tmp_path / 'app.db'}",
+                        master_key=generate_master_key(), jwt_secret="j" * 40,
+                        data_dir=tmp_path, serve_frontend=False,
+                        public_url="https://reports.example.com")
+    client = TestClient(create_app(settings))
+    for _ in range(2):
+        page = client.get("/embed/missing")
+        assert page.status_code == 200 and "remote embed" in page.text
+        assert "frame-ancestors *" in page.headers["content-security-policy"]
+    assert fetched == ["https://reports.example.com/embed.html"]  # cached
+    assert client.get("/").status_code == 404  # no SPA in API-only mode
+
+
 def test_rate_limiter():
     from reporting.app.ratelimit import RateLimiter
     rl = RateLimiter(capacity=3, refill_per_s=0.0)

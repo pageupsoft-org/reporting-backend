@@ -50,7 +50,8 @@ docker compose up -d --build      # app + PostgreSQL + Redis
 docker compose logs -f app
 ```
 
-The image builds the front end, installs locked Python dependencies and the Microsoft ODBC
+The image is API-only (`REPORTING_SERVE_FRONTEND=false`): host the front end separately and
+proxy `/api` and `/embed` to it (section 6). It installs locked Python dependencies and the Microsoft ODBC
 Driver 18 for SQL Server, runs as a non-root user, and has a health check on `/api/ready`.
 Expose port 8000 only to your reverse proxy (compose binds it to 127.0.0.1).
 
@@ -86,7 +87,75 @@ scripts/build.sh
 PORT=8000 REPORTING_WORKERS=4 scripts/run-production.sh     # run under systemd in practice
 ```
 
-## 6. Reverse proxy notes
+## 6. Option D — Vercel (front end) + Hostinger VPS (backend container)
+
+```
+browser ──▶ https://<your-app>.vercel.app        (REPORTING_PUBLIC_URL)
+              │  static UI, embed.js
+              │  /api/*  and  /embed/*  rewritten (proxied) by Vercel
+              ▼
+            https://API_DOMAIN ──▶ VPS reverse proxy (TLS) ──▶ 127.0.0.1:8081 ──▶ app container
+                                                                     ├▶ redis container
+                                                                     └▶ external PostgreSQL
+```
+
+Users only ever see the Vercel origin, so no CORS is needed. The backend serves `/embed/{id}`
+itself (with that embed's `frame-ancestors`), using `embed.html` fetched from the Vercel site.
+
+**One-time setup on the VPS**
+
+1. Point a DNS name at the VPS (`API_DOMAIN`, e.g. `api.example.com`) and add a site for it to
+   the reverse proxy that already serves ports 80/443 on the VPS, forwarding to
+   `http://127.0.0.1:8081` with `Host`, `X-Forwarded-For` and `X-Forwarded-Proto`, and with
+   an 8 MB request-body limit. nginx example:
+   ```nginx
+   server {
+       server_name api.example.com;            # plus your usual listen 443 ssl / certificate lines
+       client_max_body_size 8m;
+       location / {
+           proxy_pass http://127.0.0.1:8081;
+           proxy_set_header Host $host;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+           proxy_read_timeout 120s;
+       }
+   }
+   ```
+   If that proxy itself runs in Docker, `127.0.0.1` is the proxy container, not the VPS: change the
+   port mapping to `"172.17.0.1:8081:8000"` (the Docker bridge address of the host) or put both on
+   a shared Docker network.
+2. Create `/opt/report-tool-secret/prod.env` (`chmod 600`):
+   ```ini
+   REPORTING_PUBLIC_URL=https://<your-app>.vercel.app
+   REPORTING_APP_DB_URL=postgresql://USER:PASSWORD@HOST:5432/reporting_tool
+   REPORTING_MASTER_KEY=...        # from: python scripts/generate_secrets.py
+   REPORTING_JWT_SECRET=...
+   REPORTING_EMBED_KEY=...
+   REPORTING_ADMIN_USER=admin
+   REPORTING_ADMIN_PASSWORD=...    # first start only; remove afterwards
+   ```
+   The PostgreSQL server must accept connections from the VPS IP (e.g. an AWS security-group
+   rule for port 5432); add `?sslmode=require` to the URL if the server supports TLS.
+3. Let the VPS pull the private image once:
+   `docker login ghcr.io -u ritesh-pageup` with a classic personal access token that has
+   only `read:packages`.
+
+**GitHub (reporting-backend → Settings → Secrets and variables → Actions)**
+
+- Secret `HOSTINGER_API_KEY` (hPanel → API), variable `HOSTINGER_VM_ID`.
+- `.github/workflows/deploy.yml` builds the image, pushes it to
+  `ghcr.io/ritesh-pageup/reporting-backend:<commit sha>`, then asks Hostinger to deploy
+  `docker-compose.prod.yml` with that tag.
+
+**Vercel (reporting-frontend)**
+
+1. Replace `API_DOMAIN` in `vercel.json` with the backend's DNS name and push.
+2. Import the repository in Vercel (framework: Vite; settings come from `vercel.json`).
+3. Put the Vercel URL (or your custom domain) in `REPORTING_PUBLIC_URL` and redeploy the backend.
+
+Check: `https://<your-app>.vercel.app/api/ready` returns `{"status":"ready"}`.
+
+## 7. Reverse proxy notes
 
 - Forward `Host`, `X-Forwarded-For` and `X-Forwarded-Proto`. The run scripts start uvicorn with
   `--proxy-headers` trusting `127.0.0.1`; if the proxy runs on another host, set
@@ -97,7 +166,7 @@ PORT=8000 REPORTING_WORKERS=4 scripts/run-production.sh     # run under systemd 
   `frame-ancestors 'none'`.
 - Health checks: liveness `GET /api/health`, readiness `GET /api/ready` (checks the app DB).
 
-## 7. Operations
+## 8. Operations
 
 - **Logs**: one access line per request with a request id (`X-Request-ID` header); unexpected
   errors are logged with that id and users see only the id.
@@ -113,7 +182,7 @@ PORT=8000 REPORTING_WORKERS=4 scripts/run-production.sh     # run under systemd 
   rotate `REPORTING_ADMIN_PASSWORD` out of `.env` after first start; review public embeds
   (admins only) and revoke unused ones.
 
-## 8. What has been verified
+## 9. What has been verified
 
 - Production mode with 4 workers on a PostgreSQL app database (clean concurrent start-up),
   strict CSP with no violations across the builder, report editor and embeds.

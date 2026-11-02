@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import time
+import urllib.request
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -34,6 +37,9 @@ page_router = APIRouter(include_in_schema=False)
 DEFAULT_MAX_AGE_S = 300
 CHART_ROW_CAP = 10_000
 limiter = RateLimiter(capacity=60, refill_per_s=1.0)
+log = logging.getLogger("reporting.embeds")
+REMOTE_PAGE_TTL_S = 60
+_remote_page: tuple[float, str] | None = None
 
 
 class EmbedInfo(BaseModel):
@@ -252,13 +258,36 @@ def embed_page_headers(services: Services, embed_id: str) -> dict[str, str]:
     }
 
 
+def _remote_embed_html(public_url: str) -> str | None:
+    """embed.html from a separately hosted front end (cached briefly; it changes per release).
+
+    The front end's host proxies /embed/* here so the page gets this embed's frame-ancestors.
+    """
+    global _remote_page
+    now = time.monotonic()
+    if _remote_page and now - _remote_page[0] < REMOTE_PAGE_TTL_S:
+        return _remote_page[1]
+    try:
+        with urllib.request.urlopen(f"{public_url}/embed.html", timeout=5) as r:  # noqa: S310
+            html: str = r.read().decode("utf-8")
+    except (OSError, ValueError):
+        log.warning("Could not fetch %s/embed.html", public_url, exc_info=True)
+        return _remote_page[1] if _remote_page else None
+    _remote_page = (now, html)
+    return html
+
+
 @page_router.get("/embed/{embed_id}")
 def embed_page(embed_id: str, request: Request) -> Response:
     services: Services = request.app.state.services
-    static = services.settings.static_dir
-    page = Path(static, "embed.html") if static else None
+    settings = services.settings
+    page = Path(settings.static_dir, "embed.html") if settings.static_dir else None
     headers = embed_page_headers(services, embed_id)
-    if page is None or not page.exists():
-        return HTMLResponse("<p>The embed page is not built. Run <code>npm run build</code> "
-                            "in <code>frontend/</code>.</p>", status_code=503, headers=headers)
-    return HTMLResponse(page.read_text(encoding="utf-8"), headers=headers)
+    if settings.serve_frontend and page is not None and page.exists():
+        return HTMLResponse(page.read_text(encoding="utf-8"), headers=headers)
+    html = _remote_embed_html(settings.public_url) if settings.public_url else None
+    if html is None:
+        return HTMLResponse("<p>The embed page is not available. Build the front end "
+                            "(<code>npm run build</code>) or set REPORTING_PUBLIC_URL to where "
+                            "it is hosted.</p>", status_code=503, headers=headers)
+    return HTMLResponse(html, headers=headers)

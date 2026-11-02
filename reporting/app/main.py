@@ -79,7 +79,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.login_ip_limiter = RateLimiter(capacity=per_minute * 3,
                                              refill_per_s=per_minute * 3 / 60)
 
-    if settings.static_dir and Path(settings.static_dir, "index.html").exists():
+    if (settings.serve_frontend and settings.static_dir
+            and Path(settings.static_dir, "index.html").exists()):
         _mount_spa(app, Path(settings.static_dir))
     return app
 
