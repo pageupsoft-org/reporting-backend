@@ -14,7 +14,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       FORWARDED_ALLOW_IPS: "*" # only the host's reverse proxy can reach the port below
     ports:
-      - "127.0.0.1:8081:8000" # the VPS's existing reverse proxy serves API_DOMAIN -> here
+      - "8081:8000" # the VPS's existing reverse proxy serves API_DOMAIN -> here
     depends_on:
       redis: { condition: service_healthy }
     restart: unless-stopped
