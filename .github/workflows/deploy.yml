@@ -49,13 +49,37 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      # Sends the compose file's contents (not a link), so Hostinger never needs access to this
+      # private repository. API: POST /api/vps/v1/virtual-machines/{id}/docker
       - name: Deploy to Hostinger VPS
-        uses: hostinger/deploy-on-vps@v2
-        with:
-          api-key: ${{ secrets.HOSTINGER_API_KEY }}
-          virtual-machine: ${{ vars.HOSTINGER_VM_ID }}
-          project-name: db-reporting-tools
-          personal-token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-          docker-compose-path: docker-compose.prod.yml
-          environment-variables: |
-            IMAGE_TAG=${{ github.sha }}
+        env:
+          HOSTINGER_API_KEY: ${{ secrets.HOSTINGER_API_KEY }}
+          VM_ID: ${{ vars.HOSTINGER_VM_ID }}
+          PROJECT: db-reporting-tools
+          API: https://developers.hostinger.com/api/vps/v1/virtual-machines
+        run: |
+          set -euo pipefail
+          test "$(wc -c < docker-compose.prod.yml)" -le 8192 || { echo "compose file over 8192 bytes"; exit 1; }
+          body=$(jq -n --rawfile content docker-compose.prod.yml --arg env "IMAGE_TAG=${GITHUB_SHA}" \
+            --arg name "$PROJECT" '{project_name: $name, content: $content, environment: $env}')
+          code=$(curl -sS -o deploy.json -w '%{http_code}' -X POST "$API/$VM_ID/docker" \
+            -H "Authorization: Bearer $HOSTINGER_API_KEY" -H "Content-Type: application/json" -d "$body")
+          cat deploy.json; echo
+          [ "$code" = 200 ] || { echo "Hostinger API returned HTTP $code"; exit 1; }
+
+          # Wait for Hostinger to pull the image and start the containers.
+          action=$(jq -r '.id // empty' deploy.json)
+          [ -n "$action" ] || exit 0
+          for _ in $(seq 60); do
+            sleep 5
+            state=$(curl -sS "$API/$VM_ID/actions/$action" \
+              -H "Authorization: Bearer $HOSTINGER_API_KEY" | jq -r '.state // "unknown"')
+            echo "deployment: $state"
+            case "$state" in
+              success) exit 0 ;;
+              error)
+                curl -sS "$API/$VM_ID/docker/$PROJECT/logs" -H "Authorization: Bearer $HOSTINGER_API_KEY" || true
+                exit 1 ;;
+            esac
+          done
+          echo "Still running after 5 minutes; check Docker Manager in hPanel."
