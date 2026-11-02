@@ -1,0 +1,16 @@
+.venv/
+.venv-wsl/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.import_linter_cache/
+data/
+# Front end: separate repository (github.com/ritesh-pageup/reporting-frontend), cloned into frontend/
+frontend/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo

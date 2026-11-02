@@ -1,0 +1,30 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_PASSWORD: postgres }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --all-extras
+      - name: Ruff
+        run: uv run ruff check reporting tests
+      - name: Module boundaries (import-linter)
+        run: uv run lint-imports
+      - name: mypy
+        run: uv run mypy reporting
+      - name: Demo data (SQLite + PostgreSQL)
+        run: |
+          uv run python scripts/seed_demo.py
+          uv run python scripts/seed_postgres_demo.py postgresql://postgres:postgres@localhost:5432
+      - name: Tests (incl. live PostgreSQL and cross-engine golden results)
+        run: uv run pytest
+        env:
+          REPORTING_TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432

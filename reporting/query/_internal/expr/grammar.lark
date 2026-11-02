@@ -1,0 +1,65 @@
+// Expression grammar (plan §4.3). Anything outside it is a parse error.
+?start: expr
+
+?expr: or_expr
+
+?or_expr: and_expr
+        | or_expr _OR and_expr          -> or_
+
+?and_expr: not_expr
+         | and_expr _AND not_expr       -> and_
+
+?not_expr: _NOT not_expr                -> not_
+         | comparison
+
+?comparison: additive
+           | additive COMP_OP additive  -> compare
+
+?additive: term
+         | additive ADD_OP term         -> binop
+
+?term: factor
+     | term MUL_OP factor               -> binop
+
+?factor: "-" factor                     -> neg
+       | primary
+
+?primary: NUMBER                        -> number
+        | STRING                        -> string
+        | _TRUE                         -> true
+        | _FALSE                        -> false
+        | _NULL                         -> null
+        | field_ref
+        | CALC                          -> calc_ref
+        | func_call
+        | case_expr
+        | "(" expr ")"
+
+field_ref: NAME "." (NAME | QUOTED)
+func_call: NAME "(" [expr ("," expr)*] ")"
+case_expr: _CASE when_clause+ [_ELSE expr] _END
+when_clause: _WHEN expr _THEN expr
+
+_OR: "OR"i
+_AND: "AND"i
+_NOT: "NOT"i
+_TRUE: "TRUE"i
+_FALSE: "FALSE"i
+_NULL: "NULL"i
+_CASE: "CASE"i
+_WHEN: "WHEN"i
+_THEN: "THEN"i
+_ELSE: "ELSE"i
+_END: "END"i
+
+COMP_OP: "<=" | ">=" | "<>" | "=" | "<" | ">"
+ADD_OP: "+" | "-"
+MUL_OP: "*" | "/"
+NAME: /[A-Za-z_][A-Za-z0-9_]*/
+QUOTED: /"(?:[^"]|"")+"/
+CALC: /\[[A-Za-z_][A-Za-z0-9_]*\]/
+STRING: /'(?:[^']|'')*'/
+NUMBER: /(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/
+
+%import common.WS
+%ignore WS

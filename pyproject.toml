@@ -1,0 +1,150 @@
+[project]
+name = "reporting"
+version = "0.1.0"
+description = "Database Reporting Tool: browse schemas, build reports, compile safe SQL"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    "sqlalchemy>=2.0.29",
+    "pandas>=2.2",
+    "pyarrow>=15",
+    "lark>=1.1.9",
+    "cryptography>=42",
+    "pyjwt>=2.8",
+    "openpyxl>=3.1",
+    "bcrypt>=4.1",
+    "tzdata>=2024.1",  # IANA zones on Windows
+    # Database drivers, imported only when a connection of that kind is used.
+    "psycopg[binary]>=3.1",
+    "pymysql>=1.1",
+    "pyodbc>=5.1",
+    "redis>=5",  # optional shared result cache (REDIS_URL)
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "hypothesis>=6.100",
+    "httpx>=0.27",
+    "import-linter>=2.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "fakeredis>=2.20",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["reporting"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::hypothesis.errors.HypothesisWarning", "ignore:Using `httpx`:DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501", "SIM102"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+
+[tool.importlinter]
+root_package = "reporting"
+
+[[tool.importlinter.contracts]]
+name = "Layers: app -> query -> metadata -> connections -> core"
+type = "layers"
+layers = [
+    "reporting.app",
+    "reporting.query",
+    "reporting.metadata",
+    "reporting.connections",
+    "reporting.core",
+]
+
+[[tool.importlinter.contracts]]
+name = "Independence: render, auth and connections do not import each other"
+type = "independence"
+modules = ["reporting.render", "reporting.auth", "reporting.connections", "reporting.reports"]
+
+[[tool.importlinter.contracts]]
+name = "render, auth and connections call no other module"
+type = "forbidden"
+source_modules = ["reporting.render", "reporting.auth", "reporting.connections", "reporting.reports"]
+forbidden_modules = ["reporting.app", "reporting.query", "reporting.metadata"]
+
+[[tool.importlinter.contracts]]
+name = "query and metadata do not import render, auth or app"
+type = "forbidden"
+source_modules = ["reporting.query", "reporting.metadata"]
+forbidden_modules = ["reporting.render", "reporting.auth", "reporting.app", "reporting.reports"]
+
+[[tool.importlinter.contracts]]
+name = "No private imports from outside: connections"
+type = "forbidden"
+source_modules = ["reporting.connections"]
+forbidden_modules = ["reporting.metadata._internal", "reporting.query._internal", "reporting.render._internal", "reporting.auth._internal", "reporting.reports._internal"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "No private imports from outside: metadata"
+type = "forbidden"
+source_modules = ["reporting.metadata"]
+forbidden_modules = ["reporting.connections._internal", "reporting.query._internal", "reporting.render._internal", "reporting.auth._internal", "reporting.reports._internal"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "No private imports from outside: query"
+type = "forbidden"
+source_modules = ["reporting.query"]
+forbidden_modules = ["reporting.connections._internal", "reporting.metadata._internal", "reporting.render._internal", "reporting.auth._internal", "reporting.reports._internal"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "No private imports from outside: render"
+type = "forbidden"
+source_modules = ["reporting.render"]
+forbidden_modules = ["reporting.connections._internal", "reporting.metadata._internal", "reporting.query._internal", "reporting.auth._internal", "reporting.reports._internal"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "No private imports from outside: auth"
+type = "forbidden"
+source_modules = ["reporting.auth"]
+forbidden_modules = ["reporting.connections._internal", "reporting.metadata._internal", "reporting.query._internal", "reporting.render._internal", "reporting.reports._internal"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "No private imports from outside: app"
+type = "forbidden"
+source_modules = ["reporting.app"]
+forbidden_modules = ["reporting.connections._internal", "reporting.metadata._internal", "reporting.query._internal", "reporting.render._internal", "reporting.auth._internal", "reporting.reports._internal"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "No private imports from outside: core"
+type = "forbidden"
+source_modules = ["reporting.core"]
+forbidden_modules = ["reporting.connections._internal", "reporting.metadata._internal", "reporting.query._internal", "reporting.render._internal", "reporting.auth._internal", "reporting.reports._internal"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "No private imports from outside: reports"
+type = "forbidden"
+source_modules = ["reporting.reports"]
+forbidden_modules = ["reporting.connections._internal", "reporting.metadata._internal", "reporting.query._internal", "reporting.render._internal", "reporting.auth._internal"]
+allow_indirect_imports = true

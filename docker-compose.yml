@@ -1,0 +1,45 @@
+# Production-style stack: app (4 workers) + PostgreSQL (app database) + Redis (shared cache).
+#   cp .env.example .env    # fill in secrets (python scripts/generate_secrets.py)
+#   docker compose up -d --build
+# Put an HTTPS reverse proxy (nginx, Traefik, a cloud load balancer) in front of port 8000.
+services:
+  app:
+    build: .
+    image: reporting:latest
+    env_file: .env
+    environment:
+      REPORTING_ENV: production
+      REPORTING_APP_DB_URL: postgresql+psycopg://reporting:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/reporting
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: reporting
+      POSTGRES_USER: reporting
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reporting -d reporting"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  pgdata:
