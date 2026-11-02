@@ -55,6 +55,7 @@ jobs:
           api-key: ${{ secrets.HOSTINGER_API_KEY }}
           virtual-machine: ${{ vars.HOSTINGER_VM_ID }}
           project-name: db-reporting-tools
+          personal-token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           docker-compose-path: docker-compose.prod.yml
           environment-variables: |
             IMAGE_TAG=${{ github.sha }}
