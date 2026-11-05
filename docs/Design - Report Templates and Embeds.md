@@ -1,5 +1,13 @@
 # Design: Report Templates and Embeddable Components
 
+> **Update (2026-11-05):** the separate *report* kind was removed: every document is a
+> template (`kind = "template"`), readable by all signed-in users and editable by its owner or
+> an admin. "Use template" opens the template (nothing is copied); "Generate report" downloads
+> its tables and charts as Excel (`POST /api/reports/{id}/export`, one sheet each, with chosen
+> filter values); "Open in builder" edits one element's query in the Builder and writes it back.
+> Existing reports and their embeds are deleted at startup. Sections below that describe
+> reports are kept for history.
+
 Status: MVP implemented (see `TASKS.md`, Phase 9). Later phases are proposals.
 
 This design extends the existing architecture (`Project Plan Database Reporting Tool.md`):

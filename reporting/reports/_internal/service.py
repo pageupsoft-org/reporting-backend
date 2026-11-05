@@ -93,11 +93,20 @@ class SqlReportService:
             Column("created_at", DateTime(timezone=True), nullable=False),
         )
         create_tables(self._db, md)
+        self._delete_legacy_reports()
         # View counting is buffered: a page view must never cost a database write.
         self._views_lock = threading.Lock()
         self._pending_views: Counter[str] = Counter()
         self._last_view: dict[tuple[str, str], float] = {}
         self._last_flush = time.monotonic()
+
+    def _delete_legacy_reports(self) -> None:
+        """Reports were removed (templates are the only documents): delete any left from
+        earlier versions, with their embeds. Idempotent, safe with concurrent workers."""
+        legacy = select(self._docs.c.id).where(self._docs.c.kind != "template")
+        with self._db.begin() as conn:
+            conn.execute(delete(self._embeds).where(self._embeds.c.document_id.in_(legacy)))
+            conn.execute(delete(self._docs).where(self._docs.c.kind != "template"))
 
     # -- documents ------------------------------------------------------------------------
 

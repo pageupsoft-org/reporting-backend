@@ -22,7 +22,7 @@ MAX_INLINE_IMAGE = 1_400_000  # ~1 MB once base64-decoded
 MIN_REFRESH_S = 30
 
 ElementType = Literal["text", "table", "chart", "image"]
-DocumentKind = Literal["template", "report"]
+DocumentKind = Literal["template"]  # every saved document is a template (reports were removed)
 ElementId = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,40}$")]
 
 
@@ -173,7 +173,7 @@ class ReportDocument(Frozen):
 class SaveReport(Frozen):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=2000)
-    kind: DocumentKind = "report"
+    kind: DocumentKind = "template"
     document: ReportDocument = ReportDocument()
     version: int | None = None  # required on update: the version that was read
 

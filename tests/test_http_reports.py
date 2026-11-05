@@ -66,27 +66,49 @@ def test_template_lifecycle(client, admin, conn_id, users):
     assert [t["name"] for t in client.get("/api/reports?kind=template", headers=vic).json()] == ["Sales overview"]
     assert client.put(f"/api/reports/{tpl['id']}", headers=vic,
                       json={"name": "x", "kind": "template", "version": 1}).status_code == 403
-    mine = client.post(f"/api/reports/{tpl['id']}/duplicate", headers=vic, json={"kind": "report"})
+    mine = client.post(f"/api/reports/{tpl['id']}/duplicate", headers=vic, json={})
     assert mine.status_code == 201 and mine.json()["source_id"] == tpl["id"]
-    assert mine.json()["owner_id"] != tpl["owner_id"] and mine.json()["name"] == "Sales overview"
-
-    # reports are private to their owner (and admins)
-    rid = mine.json()["id"]
-    assert client.get(f"/api/reports/{rid}", headers=ana).status_code == 403
-    assert client.get(f"/api/reports/{rid}", headers=admin).status_code == 200
-    assert [r["id"] for r in client.get("/api/reports?kind=report", headers=ana).json()] == []
+    assert mine.json()["kind"] == "template" and mine.json()["name"] == "Sales overview (copy)"
+    assert mine.json()["owner_id"] != tpl["owner_id"]
+    assert {t["name"] for t in client.get("/api/reports", headers=ana).json()} == {
+        "Sales overview", "Sales overview (copy)"}  # every template is shared
 
     # optimistic concurrency
-    body = {"name": "My sales", "kind": "report", "document": document(conn_id), "version": 1}
+    rid = mine.json()["id"]
+    body = {"name": "My sales", "kind": "template", "document": document(conn_id), "version": 1}
     assert client.put(f"/api/reports/{rid}", headers=vic, json=body).json()["version"] == 2
     stale = client.put(f"/api/reports/{rid}", headers=vic, json=body)
     assert stale.status_code == 409 and stale.json()["details"]["current_version"] == 2
 
-    # report -> template ("save as template"), then delete
-    t2 = client.post(f"/api/reports/{rid}/duplicate", headers=vic, json={"kind": "template", "name": "Vic's"})
-    assert t2.json()["kind"] == "template"
+    # the separate "report" kind no longer exists
+    assert client.post("/api/reports", headers=vic, json={**body, "kind": "report"}).status_code == 422
     assert client.delete(f"/api/reports/{rid}", headers=vic).status_code == 204
     assert client.get(f"/api/reports/{rid}", headers=vic).status_code == 404
+
+
+def test_generate_report_downloads_excel(client, conn_id, users):
+    """"Generate report": one sheet per table/chart, with the chosen filter values."""
+    import io
+
+    import openpyxl
+    d = document(conn_id)
+    d["parameters"] = [{"id": "country", "label": "Country", "type": "equals",
+                        "targets": [{"element_id": "table", "ref": "c.country"}]}]
+    tpl = client.post("/api/reports", headers=users["ana"],
+                      json={"name": "Sales / overview", "document": d}).json()
+    r = client.post(f"/api/reports/{tpl['id']}/export", headers=users["vic"], json={})
+    assert r.status_code == 200, r.text
+    assert 'filename="Sales-overview-' in r.headers["content-disposition"]
+    book = openpyxl.load_workbook(io.BytesIO(r.content))
+    assert book.sheetnames == ["Revenue", "Table 2"]
+    all_rows = book["Table 2"].max_row
+    one = client.post(f"/api/reports/{tpl['id']}/export", headers=users["vic"],
+                      json={"values": {"country": "Germany"}})
+    sheet = openpyxl.load_workbook(io.BytesIO(one.content))["Table 2"]
+    assert 2 == sheet.max_row < all_rows and sheet.cell(2, 1).value == "Germany"
+    bad = client.post(f"/api/reports/{tpl['id']}/export", headers=users["vic"],
+                      json={"values": {"nope": "x"}})
+    assert bad.status_code == 422 and "Unknown filter" in bad.json()["message"]
 
 
 def test_binding_validation(client, admin, conn_id, users):
@@ -115,7 +137,7 @@ import jwt  # noqa: E402
 @pytest.fixture
 def report_id(client, users, conn_id):
     r = client.post("/api/reports", headers=users["ana"],
-                    json={"name": "Dash", "kind": "report", "document": document(conn_id)})
+                    json={"name": "Dash", "document": document(conn_id)})
     return r.json()["id"]
 
 

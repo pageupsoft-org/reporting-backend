@@ -59,9 +59,7 @@ def test_crud_and_optimistic_versioning(reports):
         reports.update(r.id, SaveReport(name="stale", document=doc(), version=1))
     assert exc.value.details["current_version"] == 2
     assert [s.name for s in reports.list_documents(kind="template")] == ["Sales v2"]
-    assert reports.list_documents(kind="report") == []
-    copy = reports.create("u2", SaveReport(name="Mine", kind="report", document=r2.document),
-                          source_id=r.id)
+    copy = reports.create("u2", SaveReport(name="Mine", document=r2.document), source_id=r.id)
     assert copy.source_id == r.id and reports.list_documents(owner_id="u2")[0].element_count == 2
     reports.delete(r.id)
     with pytest.raises(NotFound):
@@ -118,3 +116,18 @@ def test_expiry_and_delete_revokes(reports):
     e = reports.create_embed(r.id, "u1", CreateEmbed(element_id="c1", mode="public"))
     reports.delete(r.id)
     assert reports.get_embed(e.id).revoked_at is not None
+
+
+def test_legacy_reports_are_deleted_at_startup(app_db_url):
+    """Reports were removed: rows left from earlier versions go, with their embeds."""
+    from sqlalchemy import create_engine, text
+    svc = create_report_service(app_db_url, KEY)
+    keep = svc.create("u1", SaveReport(name="T", document=doc(TITLE, CHART)))
+    old = svc.create("u1", SaveReport(name="Old report", document=doc(TITLE, CHART)))
+    embed = svc.create_embed(old.id, "u1", CreateEmbed(element_id="c1"))
+    with create_engine(app_db_url).begin() as conn:
+        conn.execute(text("update reports_documents set kind = 'report' where id = :id"), {"id": old.id})
+    svc = create_report_service(app_db_url, KEY)
+    assert [d.id for d in svc.list_documents()] == [keep.id]
+    with pytest.raises(NotFound):
+        svc.get_embed(embed.id)

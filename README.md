@@ -80,12 +80,16 @@ Database drivers are optional extras: `uv sync --extra postgresql --extra mysql 
 
 Design: [`docs/Design - Report Templates and Embeds.md`](docs/Design%20-%20Report%20Templates%20and%20Embeds.md).
 
-- **Reports & templates** tab: a library of shared templates and your reports. Start blank,
-  or use **Save to report…** in the builder to add the current query as a chart or table.
-  In the editor, **Add element** (title, section, text, image, table, chart), drag the ⠿
-  handle to move, drag the corner to resize, and configure the selection in the side panel
-  (arrow keys move, Shift+arrows resize). **Use template** makes your own copy;
-  **Save as template** shares a report's layout.
+- **Templates** tab: a shared library of templates (the only saved documents; there is no
+  separate "report" type). Start blank, or use **Save to template…** in the builder to add the
+  current query as a chart or table. **Use template** opens it with its filters and live data
+  (nothing is created). Owners edit in place: **Add element** (title, section, text, image,
+  table, chart), drag the ⠿ handle to move, drag the corner to resize, configure the selection
+  in the side panel (arrow keys move, Shift+arrows resize), then **Update template**.
+  **Open in builder** loads a table/chart's query into the Builder; **Update template** in its
+  banner writes the edited query back. **Generate report** downloads every table and chart as
+  an Excel workbook (one sheet each) with the chosen filter values; data always runs with the
+  viewer's own permissions. **Duplicate** in the library makes your own copy.
 - **Embed…** on any element creates an embed: *private (signed)* — your website's server
   signs a short-lived token with the embed secret — or *public* (admins only). Options: theme,
   refresh interval, allowed websites (enforced with CSP `frame-ancestors`), title, CSV download.

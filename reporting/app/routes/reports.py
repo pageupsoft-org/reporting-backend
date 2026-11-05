@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Literal
+import re
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Response
 from pydantic import BaseModel, Field
@@ -11,23 +12,32 @@ from pydantic import ValidationError as PydanticValidationError
 from reporting.app.deps import PrincipalDep, ServicesDep
 from reporting.app.wiring import Services
 from reporting.auth import Action, ResourceRef
-from reporting.core import ConnectionId, Issue, PermissionDenied, Principal, ValidationFailed
+from reporting.core import (
+    ConnectionId,
+    ExecutionLimits,
+    Issue,
+    PermissionDenied,
+    Principal,
+    ValidationFailed,
+)
 from reporting.query import PERIODS, parse_spec
 from reporting.render import ChartSpec
-from reporting.reports import DocumentKind, Report, ReportDocument, ReportSummary, SaveReport
+from reporting.reports import (
+    DocumentKind,
+    Report,
+    ReportDocument,
+    ReportSummary,
+    SaveReport,
+    resolve_parameters,
+)
 
 router = APIRouter(tags=["reports"])
 
 
-def can_read(principal: Principal, report: Report) -> bool:
-    return report.kind == "template" or principal.is_admin or report.owner_id == principal.user_id
-
-
 def readable(services: Services, principal: Principal, report_id: str) -> Report:
-    report = services.reports.get(report_id)
-    if not can_read(principal, report):
-        raise PermissionDenied("You do not have access to this report")
-    return report
+    """Templates are a shared library: any signed-in user can read one. Data always runs with
+    the reader's own permissions, so reading a template never grants access to data."""
+    return services.reports.get(report_id)
 
 
 def writable(services: Services, principal: Principal, report_id: str) -> Report:
@@ -110,9 +120,7 @@ def check_parameters(services: Services, principal: Principal, document: ReportD
 @router.get("/reports", response_model=list[ReportSummary])
 def list_reports(services: ServicesDep, principal: PrincipalDep,
                  kind: DocumentKind | None = None) -> list[ReportSummary]:
-    items = services.reports.list_documents(kind=kind)
-    return [r for r in items if r.kind == "template" or principal.is_admin
-            or r.owner_id == principal.user_id]
+    return services.reports.list_documents(kind=kind)
 
 
 @router.post("/reports", response_model=Report, status_code=201)
@@ -143,19 +151,53 @@ def delete_report(report_id: str, services: ServicesDep, principal: PrincipalDep
 
 
 class DuplicateRequest(BaseModel):
-    kind: Literal["template", "report"]
+    kind: DocumentKind = "template"
     name: str | None = Field(default=None, max_length=200)
 
 
 @router.post("/reports/{report_id}/duplicate", response_model=Report, status_code=201)
 def duplicate_report(report_id: str, body: DuplicateRequest, services: ServicesDep,
                      principal: PrincipalDep) -> Report:
-    """"Use template" (template → report) and "Save as template" (report → template)."""
+    """A copy of a template, owned by the caller."""
     source = readable(services, principal, report_id)
-    name = body.name or (source.name if body.kind != source.kind else f"{source.name} (copy)")
     return services.reports.create(
         principal.user_id,
-        SaveReport(name=name, description=source.description, kind=body.kind,
+        SaveReport(name=body.name or f"{source.name} (copy)", description=source.description,
                    document=source.document),
         source_id=source.id,
     )
+
+
+class ExportRequest(BaseModel):
+    # Report-filter values chosen on screen (filter id → value; "one of" takes a list).
+    values: dict[str, str | list[str]] = {}
+
+
+EXPORT_LIMITS = ExecutionLimits(timeout_s=120.0, max_rows=100_000)
+
+
+@router.post("/reports/{report_id}/export")
+def export_report(report_id: str, body: ExportRequest, services: ServicesDep,
+                  principal: PrincipalDep) -> Response:
+    """"Generate report": every table and chart as an Excel sheet, with the chosen filter
+    values, run with the caller's own permissions. Nothing is saved."""
+    report = readable(services, principal, report_id)
+    document = report.document
+    sheets = []
+    for i, el in enumerate(e for e in document.elements if e.binding is not None):
+        assert el.binding is not None
+        filters = resolve_parameters(document, el.id, token_values=dict(body.values))
+        query = el.binding.query
+        spec = parse_spec({**query, "filters": [*query.get("filters", []), *filters]})
+        services.auth.authorize(principal, Action.EXPORT,
+                                ResourceRef.connection(spec.connection_id))
+        access = services.auth.access_context(principal, ConnectionId(spec.connection_id))
+        result = services.query.execute(spec, access, EXPORT_LIMITS)
+        sheets.append((el.title or f"{el.type.title()} {i + 1}", result))
+    if not sheets:
+        raise ValidationFailed("This template has no tables or charts to export")
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M")
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", report.name).strip("-")[:60] or "report"
+    f = services.render.export_workbook(sheets, f"{safe}-{stamp}")
+    return Response(content=f.data, media_type=f.content_type,
+                    headers={"Content-Disposition": f'attachment; filename="{f.filename}"'})

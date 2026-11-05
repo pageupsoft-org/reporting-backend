@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -239,27 +240,55 @@ class PandasRenderService:
     # -- export ---------------------------------------------------------------------------
 
     def export(self, result: QueryResult, fmt: ExportFormat) -> ExportFile:
-        cols = [c for c in result.columns if c.id in result.frame.columns]
-        frame = result.frame[[c.id for c in cols]].copy()
-        frame.columns = [c.label for c in cols]
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M")
         if fmt == "csv":
-            data = frame.to_csv(index=False, date_format="%Y-%m-%d %H:%M:%S").encode("utf-8-sig")
-            return ExportFile(filename=f"report-{stamp}.csv", content_type="text/csv", data=data)
-        for c in frame.columns:  # Excel cannot store timezone-aware datetimes
-            if isinstance(frame[c].dtype, pd.DatetimeTZDtype):
-                frame[c] = frame[c].dt.tz_convert("UTC").dt.tz_localize(None)
+            data = _labelled(result).to_csv(index=False, date_format="%Y-%m-%d %H:%M:%S")
+            return ExportFile(filename=f"report-{stamp}.csv", content_type="text/csv",
+                              data=data.encode("utf-8-sig"))
+        return self.export_workbook([("Report", result)], f"report-{stamp}")
+
+    def export_workbook(self, sheets: list[tuple[str, QueryResult]],
+                        filename: str) -> ExportFile:
+        """One sheet per result; names made Excel-safe and unique."""
         buf = io.BytesIO()
+        used: set[str] = set()
         with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-            frame.to_excel(writer, index=False, sheet_name="Report")
-            sheet = writer.sheets["Report"]
-            sheet.freeze_panes = "A2"
-            for i, c in enumerate(frame.columns, start=1):
-                width = max(len(str(c)), *(len(str(v)) for v in frame[c].head(200))) \
-                    if len(frame) else len(str(c))
-                sheet.column_dimensions[sheet.cell(1, i).column_letter].width = min(width + 2, 60)
+            for title, result in sheets:
+                name = _sheet_name(title, used)
+                frame = _labelled(result)
+                for c in frame.columns:  # Excel cannot store timezone-aware datetimes
+                    if isinstance(frame[c].dtype, pd.DatetimeTZDtype):
+                        frame[c] = frame[c].dt.tz_convert("UTC").dt.tz_localize(None)
+                frame.to_excel(writer, index=False, sheet_name=name)
+                sheet = writer.sheets[name]
+                sheet.freeze_panes = "A2"
+                for i, c in enumerate(frame.columns, start=1):
+                    width = max(len(str(c)), *(len(str(v)) for v in frame[c].head(200))) \
+                        if len(frame) else len(str(c))
+                    letter = sheet.cell(1, i).column_letter
+                    sheet.column_dimensions[letter].width = min(width + 2, 60)
+            if not sheets:
+                pd.DataFrame().to_excel(writer, index=False, sheet_name="Empty")
         return ExportFile(
-            filename=f"report-{stamp}.xlsx",
+            filename=f"{filename}.xlsx",
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             data=buf.getvalue(),
         )
+
+
+def _labelled(result: QueryResult) -> pd.DataFrame:
+    """The result's columns in order, headed by their labels."""
+    cols = [c for c in result.columns if c.id in result.frame.columns]
+    frame = result.frame[[c.id for c in cols]].copy()
+    frame.columns = [c.label for c in cols]
+    return frame
+
+
+def _sheet_name(title: str, used: set[str]) -> str:
+    base = re.sub(r"[\[\]:*?/\\]", " ", title).strip().strip("'")[:31] or "Sheet"
+    name, i = base, 2
+    while name.lower() in used:
+        suffix = f" ({i})"
+        name, i = base[:31 - len(suffix)] + suffix, i + 1
+    used.add(name.lower())
+    return name
