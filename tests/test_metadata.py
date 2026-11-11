@@ -25,6 +25,8 @@ def ref(conn, name):
     (Dialect.MYSQL, "tinyint(1)", DataType.BOOLEAN),
     (Dialect.MYSQL, "int(10) unsigned", DataType.INTEGER),
     (Dialect.MYSQL, "enum('a','b')", DataType.TEXT),
+    (Dialect.POSTGRESQL, "enum(work_request_status)", DataType.TEXT),
+    (Dialect.POSTGRESQL, 'enum(public."Status")', DataType.TEXT),
     (Dialect.SQLITE, "NUMERIC(12,2)", DataType.DECIMAL),
     (Dialect.SQLITE, "DATETIME", DataType.DATETIME),
     (Dialect.SQLITE, "VARCHAR(10)", DataType.TEXT),

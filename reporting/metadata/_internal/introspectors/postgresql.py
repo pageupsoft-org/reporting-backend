@@ -17,9 +17,13 @@ WHERE c.relkind IN ('r', 'p', 'v', 'm') AND {_SYSTEM}
 
 COLUMNS = f"""
 SELECT n.nspname AS schema_name, c.relname AS table_name, a.attname AS column_name,
-       format_type(a.atttypid, a.atttypmod) AS native_type,
+       CASE t.typtype  -- enums read as "enum(name)" (text); domains as their base type
+         WHEN 'e' THEN 'enum(' || format_type(a.atttypid, NULL) || ')'
+         WHEN 'd' THEN format_type(t.typbasetype, t.typtypmod)
+         ELSE format_type(a.atttypid, a.atttypmod) END AS native_type,
        NOT a.attnotnull AS nullable, a.attnum AS ordinal
 FROM pg_attribute a
+JOIN pg_type t ON t.oid = a.atttypid
 JOIN pg_class c ON c.oid = a.attrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'p', 'v', 'm') AND {_SYSTEM}

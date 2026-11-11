@@ -15,6 +15,7 @@ from sqlalchemy import (
     Numeric,
     String,
     and_,
+    cast,
     column,
     not_,
     select,
@@ -153,6 +154,8 @@ def compile_plan(plan: Plan, dialect: Dialect) -> CompiledQuery:
         if op == "between":
             return target.between(binder.bind(v[0], t), binder.bind(v[1], t))
         if op == "like":
+            if dialect is Dialect.POSTGRESQL:  # enum columns have no LIKE operator
+                target = cast(target, String())
             return target.like(binder.bind(v, String()))
         b = binder.bind(v, t)
         return {"eq": target == b, "ne": target != b, "gt": target > b, "gte": target >= b,
