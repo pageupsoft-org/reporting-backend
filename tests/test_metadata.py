@@ -123,6 +123,21 @@ def test_snapshot_persists_across_instances(app_db_url, connections, sales_conn)
     assert b.snapshot(sales_conn.id).version == 1
 
 
+
+def test_old_format_snapshot_is_reread(app_db_url, connections, sales_conn):
+    a = create_metadata_service(app_db_url, connections)
+    a.snapshot(sales_conn.id)
+    from sqlalchemy import create_engine, text  # mark the stored snapshot as an older format
+    with create_engine(app_db_url).begin() as conn:
+        payload = conn.execute(text("SELECT payload FROM metadata_snapshots")).scalar_one()
+        conn.execute(text("UPDATE metadata_snapshots SET payload = :p"),
+                     {"p": payload.replace('"format":2', '"format":1')})
+    b = create_metadata_service(app_db_url, connections)
+    snap = b.snapshot(sales_conn.id)
+    assert (snap.version, snap.format) == (2, 2)  # re-read and stored as a new version
+    c = create_metadata_service(app_db_url, connections)
+    assert c.snapshot(sales_conn.id).version == 2  # no further re-reads
+
 def test_user_relationship(metadata, sales_conn):
     db = DatabaseRef(connection_id=sales_conn.id, database="main")
     with pytest.raises(ValidationFailed):

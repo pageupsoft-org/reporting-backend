@@ -69,6 +69,8 @@ class SchemaSnapshot(Frozen):
     created_at: datetime
     tables: tuple[TableSchema, ...]
     relationships: tuple[RelationshipDef, ...]
+    # How the columns were introspected; older snapshots are re-read automatically on use.
+    format: int = 1
 
     _tables: dict[str, TableSchema] = PrivateAttr(default_factory=dict)
     _rels: dict[str, RelationshipDef] = PrivateAttr(default_factory=dict)

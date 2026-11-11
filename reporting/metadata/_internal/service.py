@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 
@@ -35,7 +36,12 @@ from reporting.core import (
     new_id,
 )
 from reporting.core.db import create_app_engine, create_tables
-from reporting.metadata._internal.builder import build_snapshot, content_signature, diff_snapshots
+from reporting.metadata._internal.builder import (
+    SNAPSHOT_FORMAT,
+    build_snapshot,
+    content_signature,
+    diff_snapshots,
+)
 from reporting.metadata._internal.graph import find_paths
 from reporting.metadata._internal.introspectors import QUERIES
 from reporting.metadata.api import (
@@ -51,9 +57,12 @@ from reporting.metadata.api import (
     TableSummary,
 )
 
+log = logging.getLogger(__name__)
+
 CATALOG_LIMITS = ExecutionLimits(timeout_s=60.0, max_rows=2_000_000)
 FRESHNESS_S = 2.0  # how stale a process's view of the latest snapshot may be
 MAX_COUNTED_TABLES = 200
+UPGRADE_RETRY_S = 300.0  # wait before retrying a failed snapshot upgrade
 
 
 class SnapshotMetadataService:
@@ -79,6 +88,7 @@ class SnapshotMetadataService:
         create_tables(self._app, md)
         self._latest: dict[tuple[str, str], SchemaSnapshot] = {}
         self._checked: dict[tuple[str, str], float] = {}
+        self._upgrade_failed: dict[tuple[str, str], float] = {}
         self._lock = threading.Lock()
 
     # -- databases and tables -------------------------------------------------------------
@@ -177,10 +187,27 @@ class SnapshotMetadataService:
             stored = self._load_latest(connection_id, database)
             if stored is None:
                 self.refresh(connection_id, database)
+            elif stored.format < SNAPSHOT_FORMAT and self._upgrade(key, now):
+                pass  # re-read with the current introspection; refresh() cached it
             elif key not in self._latest or self._latest[key].version != stored.version:
                 self._latest[key] = stored
             self._checked[key] = now
         return self._latest[key]
+
+    def _upgrade(self, key: tuple[str, str], now: float) -> bool:
+        """Re-read a snapshot stored by an older introspection format. When the database
+        can't be reached, keep using the stored one and retry later."""
+        if now - self._upgrade_failed.get(key, -UPGRADE_RETRY_S) < UPGRADE_RETRY_S:
+            return False
+        connection_id, database = key
+        try:
+            self.refresh(connection_id, database)
+            return True
+        except Exception:  # noqa: BLE001 - an unreachable database must not block reads
+            self._upgrade_failed[key] = now
+            log.warning("could not upgrade schema snapshot of %s/%s", connection_id, database,
+                        exc_info=True)
+            return False
 
     def refresh(self, connection_id: str, database: str | None = None) -> SnapshotVersion:
         database = database or self._default_db(connection_id)
@@ -188,7 +215,8 @@ class SnapshotMetadataService:
             previous = self._load_latest(connection_id, database)
             version = (previous.version + 1) if previous else 1
             fresh = self._introspect(connection_id, database, version)
-            if previous is not None and content_signature(previous) == content_signature(fresh):
+            if (previous is not None and previous.format == fresh.format
+                    and content_signature(previous) == content_signature(fresh)):
                 # Unchanged structure keeps its version so in-flight specs stay valid; row
                 # estimates are refreshed in memory.
                 self._latest[(connection_id, database)] = fresh.model_copy(

@@ -29,6 +29,10 @@ def _records(frame: pd.DataFrame) -> list[dict[str, Any]]:
     clean = frame.astype(object).where(pd.notna(frame), None)
     return list(clean.to_dict(orient="records"))
 
+# Bump when introspection or type mapping changes, so stored snapshots get re-read.
+# 2: PostgreSQL enums read as text, domains as their base type.
+SNAPSHOT_FORMAT = 2
+
 
 def build_snapshot(
     *, connection_id: str, database: str, dialect: Dialect, version: int,
@@ -79,6 +83,7 @@ def build_snapshot(
     return SchemaSnapshot(
         connection_id=connection_id, database=database, dialect=dialect.value, version=version,
         created_at=datetime.now(UTC), tables=tuple(table_list), relationships=tuple(rels),
+        format=SNAPSHOT_FORMAT,
     )
 
 
