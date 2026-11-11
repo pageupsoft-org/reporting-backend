@@ -59,6 +59,8 @@ class CheckResult:
     coerced: dict[int, DataType]
     # Inferred type of every node, keyed by ``id(node)``; used by the compiler.
     types: dict[int, DataType | str] = field(default_factory=dict)
+    # Bare field refs beside an aggregate that automatic grouping must add to GROUP BY.
+    group_fields: set[str] = field(default_factory=set)
 
 
 FieldResolver = Callable[[str, str], DataType]
@@ -116,10 +118,11 @@ def _is_iso_date(value: str) -> bool:
 
 class Checker:
     def __init__(self, resolve_field: FieldResolver, resolve_calc: CalcResolver,
-                 grouped_fields: set[str]) -> None:
+                 grouped_fields: set[str], auto_group: bool = False) -> None:
         self._field = resolve_field
         self._calc = resolve_calc
         self._grouped = grouped_fields
+        self._auto_group = auto_group
         self.fields: set[str] = set()
         self.calcs: set[str] = set()
         self.coerced: dict[int, DataType] = {}
@@ -129,9 +132,14 @@ class Checker:
         result = self._visit(node, inside_agg=False)
         if result.data_type == NULL:
             raise ExprError("Expression is always NULL")
+        group_fields: set[str] = set()
         if result.level == "aggregate":
             for ref in sorted(result.bare_fields):
-                if ref not in self._grouped:
+                if ref in self._grouped:
+                    continue
+                if self._auto_group:  # e.g. s.total - SUM(p.amount): also group by s.total
+                    group_fields.add(ref)
+                else:
                     raise ExprError(
                         f"{ref} must be inside an aggregate (e.g. SUM({ref})) or be a grouped "
                         f"column, because the expression also aggregates")
@@ -140,7 +148,7 @@ class Checker:
                     raise ExprError(f"[{name}] must be grouped or wrapped in an aggregate")
         assert isinstance(result.data_type, DataType)
         return CheckResult(result.data_type, result.level == "aggregate", self.fields,
-                           self.calcs, self.coerced, self.types)
+                           self.calcs, self.coerced, self.types, group_fields)
 
     # -- visitors -------------------------------------------------------------------------
 

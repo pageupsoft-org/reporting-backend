@@ -163,8 +163,9 @@ def compile_plan(plan: Plan, dialect: Dialect) -> CompiledQuery:
 
     if plan.filters:
         stmt = stmt.where(and_(*[condition(f) for f in plan.filters]))
-    if plan.group_ids:
-        stmt = stmt.group_by(*[exprs[g] for g in plan.group_ids])
+    if plan.group_ids or plan.group_fields:
+        stmt = stmt.group_by(*[exprs[g] for g in plan.group_ids],
+                             *[field(a, c) for a, c in plan.group_fields])
     if plan.having:
         stmt = stmt.having(and_(*[condition(f) for f in plan.having]))
     for ob in plan.order_by:

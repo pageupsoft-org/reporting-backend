@@ -84,6 +84,22 @@ def test_expression_functions_execute(query, sales_conn):
     assert row["len"] == 5
 
 
+def test_bare_column_beside_aggregate_is_grouped(query, sales_conn):
+    # Outstanding per order: the order total minus the sum of its items.
+    raw = example_spec(sales_conn.id, joins=[
+        {"alias": "i", "from_alias": "o", "relationship_id": "fk_order_items_order_id",
+         "type": "left"}], columns=[
+        {"id": "id", "kind": "field", "ref": "o.id"},
+        {"id": "gap", "kind": "expression", "expr": "o.total_amount - SUM(i.quantity * i.unit_price)"},
+    ], filters=[], having=[], order_by=[{"ref": "id"}])
+    r = run(query, sales_conn, raw)
+    assert "GROUP BY" in r.sql and "total_amount" in r.sql.split("GROUP BY")[1]
+    f = r.frame
+    assert list(f["id"]) == [1, 2, 3, 4, 5]
+    assert [round(float(v), 2) if pd.notna(v) else None for v in f["gap"]] == \
+        [0.0, 0.0, -0.01, None, 0.0]
+
+
 def test_execute_rejects_invalid(query, sales_conn):
     raw = example_spec(sales_conn.id)
     raw["columns"][0]["ref"] = "c.nope"

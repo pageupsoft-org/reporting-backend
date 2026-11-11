@@ -85,7 +85,8 @@ def test_expression_cycles(query, sales_conn):
 def test_expression_aggregation_level(query, sales_conn):
     raw = example_spec(sales_conn.id)
     raw["columns"].append({"id": "bad", "kind": "expression", "expr": "SUM(o.total_amount) + o.discount"})
-    rep = report(query, raw)
+    assert report(query, raw).valid  # automatic grouping also groups by o.discount
+    rep = report(query, {**raw, "group_by": ["country"]})
     assert any("o.discount must be inside an aggregate" in m for _, m in errors(rep))
     raw["columns"][-1]["expr"] = "SUM(o.total_amount) / 2 + LENGTH(c.country)"
     raw["columns"][-1]["expr"] = "[revenue] * 2"

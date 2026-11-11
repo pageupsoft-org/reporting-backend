@@ -112,6 +112,8 @@ class Plan:
     output: list[OutputColumn]
     warnings: list[ValidationIssue] = field(default_factory=list)
     gap_fill: GapFill | None = None
+    # Extra GROUP BY fields: bare columns used beside aggregates in expressions (auto mode).
+    group_fields: list[tuple[str, str]] = field(default_factory=list)
 
     def column(self, cid: str) -> ResolvedColumn:
         return next(c for c in self.columns if c.id == cid)
@@ -374,7 +376,8 @@ class Validator:
                 return CalcInfo(rc.data_type, rc.aggregate, grouped(rc))
 
             try:
-                checked = Checker(field_type, calc_info, grouped_fields).check(parsed[cid])
+                checked = Checker(field_type, calc_info, grouped_fields,
+                                  auto_group=explicit_group is None).check(parsed[cid])
             except ExprError as exc:
                 issues.error(path, f"{cid}: {exc.message}", code="expression")
                 continue
@@ -453,10 +456,28 @@ class Validator:
         plan = Plan(spec, snap, aliases, joins, columns, eval_order, aggregated, group_ids,
                     filters, having, order_by, output,
                     warnings=[i for i in issues.items if i.severity == "warning"],
-                    gap_fill=self._gap_fill(columns, group_ids, filters))
+                    gap_fill=self._gap_fill(columns, group_ids, filters),
+                    group_fields=self._extra_group_fields(columns, group_ids, aliases))
         return plan, issues.items
 
     # -- helpers --------------------------------------------------------------------------
+
+    @staticmethod
+    def _extra_group_fields(columns: list[ResolvedColumn], group_ids: list[str],
+                            aliases: dict[str, TableSchema]) -> list[tuple[str, str]]:
+        """Fields to add to GROUP BY for expressions like ``s.total - SUM(p.amount)``,
+        skipping ones already grouped through a plain field column."""
+        grouped = {c.spec.ref for c in columns
+                   if c.id in group_ids and isinstance(c.spec, FieldColumn)}
+        refs = sorted({ref for c in columns if c.checked is not None
+                       for ref in c.checked.group_fields} - grouped)
+        out: list[tuple[str, str]] = []
+        for ref in refs:
+            alias, column = _split_ref(ref)
+            col = aliases[alias].column(column)
+            assert col is not None
+            out.append((alias, col.name))
+        return out
 
     @staticmethod
     def _field_problem(aliases: dict[str, TableSchema], access: AccessContext | None,
