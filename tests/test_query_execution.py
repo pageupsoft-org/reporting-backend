@@ -100,6 +100,63 @@ def test_bare_column_beside_aggregate_is_grouped(query, sales_conn):
         [0.0, 0.0, -0.01, None, 0.0]
 
 
+
+def _items_spec(conn, columns, **kw):
+    return example_spec(conn.id, joins=[
+        {"alias": "c", "from_alias": "o", "relationship_id": "fk_orders_customer_id",
+         "type": "left"},
+        {"alias": "i", "from_alias": "o", "relationship_id": "fk_order_items_order_id",
+         "type": "left"}], columns=columns, filters=[], having=[], **kw)
+
+
+def test_nested_rollup_runs_per_row_then_rolls_up(query, sales_conn):
+    # Per order: total minus the item quantities; then summed per customer.
+    raw = _items_spec(sales_conn, [
+        {"id": "name", "kind": "field", "ref": "c.name"},
+        {"id": "out", "kind": "expression", "expr": "o.total_amount - SUM(i.quantity)",
+         "rollup": "sum"},
+        {"id": "items", "kind": "aggregate", "fn": "count", "arg": "i.id"},
+        {"id": "per", "kind": "expression", "expr": "[out] / NULLIF([items], 0)"},
+    ], order_by=[{"ref": "name"}])
+    r = run(query, sales_conn, raw)
+    assert "detail" in r.sql
+    f = r.frame
+    assert list(f["name"]) == ["Acme", "Globex", "Initech", "Umbrella"]
+    assert [None if pd.isna(v) else float(v) for v in f["out"]] == [327.0, 72.5, None, 270.0]
+    assert list(f["items"]) == [3, 1, 0, 1]
+    assert [None if pd.isna(v) else float(v) for v in f["per"]] == [109.0, 72.5, None, 270.0]
+
+    raw["having"] = [{"ref": "out", "op": "gt", "value": 100}]
+    raw["order_by"] = [{"ref": "out", "dir": "desc"}]
+    assert list(run(query, sales_conn, raw).frame["name"]) == ["Acme", "Umbrella"]
+
+
+def test_rollup_of_row_level_expression(query, sales_conn):
+    raw = example_spec(sales_conn.id, columns=[
+        {"id": "country", "kind": "field", "ref": "c.country"},
+        {"id": "net", "kind": "expression", "expr": "o.total_amount - o.discount",
+         "rollup": "sum"},
+    ], filters=[], having=[], order_by=[{"ref": "country"}])
+    r = run(query, sales_conn, raw)
+    assert "detail" not in r.sql
+    assert [float(v) for v in r.frame["net"]] == [275.0, 340.0, 115.5]
+
+
+@pytest.mark.parametrize("extra,fragment", [
+    ({"id": "a", "kind": "aggregate", "fn": "avg", "arg": "o.discount"},
+     "avg can't be combined with a nested roll-up"),
+    ({"id": "b", "kind": "expression", "expr": "SUM(i.quantity) * 2"}, "'b' needs a roll-up"),
+    ({"id": "t", "kind": "expression", "expr": "c.name", "rollup": "sum"}, "Sum needs a number"),
+])
+def test_rollup_validation(query, sales_conn, extra, fragment):
+    raw = _items_spec(sales_conn, [
+        {"id": "name", "kind": "field", "ref": "c.name"},
+        {"id": "out", "kind": "expression", "expr": "o.total_amount - SUM(i.quantity)",
+         "rollup": "sum"}, extra])
+    with pytest.raises(ValidationFailed) as exc:
+        run(query, sales_conn, raw)
+    assert any(fragment in i.message for i in exc.value.issues), exc.value.issues
+
 def test_execute_rejects_invalid(query, sales_conn):
     raw = example_spec(sales_conn.id)
     raw["columns"][0]["ref"] = "c.nope"

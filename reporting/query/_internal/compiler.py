@@ -31,7 +31,7 @@ from reporting.core import DataType, Dialect
 from reporting.metadata import TableSchema
 from reporting.query._internal.constructs import DateDiff, DateTrunc
 from reporting.query._internal.expr.compiler import Binder, ExprCompiler, aggregate
-from reporting.query._internal.validator import Plan, ResolvedFilter
+from reporting.query._internal.validator import REAGGREGATE, Plan, ResolvedFilter
 from reporting.query.api import (
     AggregateColumn,
     CompiledQuery,
@@ -95,6 +95,15 @@ def _table(t: TableSchema, alias: str, dialect: Dialect) -> FromClause:
                  schema=quoted_name(schema, True) if schema else None).alias(alias)
 
 
+def _no_field(alias: str, col: str) -> Expr:
+    raise AssertionError(f"{alias}.{col}: outer-step expressions only use other columns")
+
+
+def _grouped_column(plan: Plan, f: tuple[str, str]) -> str:
+    return next(c.id for c in plan.columns if c.id in plan.group_ids
+                and isinstance(c.spec, FieldColumn) and c.spec.ref == f"{f[0]}.{f[1]}")
+
+
 def compile_plan(plan: Plan, dialect: Dialect) -> CompiledQuery:
     binder = _DialectBinder(dialect)
     froms = {alias: _table(t, alias, dialect) for alias, t in plan.aliases.items()}
@@ -115,6 +124,8 @@ def compile_plan(plan: Plan, dialect: Dialect) -> CompiledQuery:
 
     exprs: dict[str, Expr] = {}
     for cid in plan.eval_order:
+        if cid in plan.outer_only:
+            continue
         rc = plan.column(cid)
         spec = rc.spec
         if isinstance(spec, FieldColumn):
@@ -132,14 +143,14 @@ def compile_plan(plan: Plan, dialect: Dialect) -> CompiledQuery:
             exprs[cid] = aggregate(spec.fn, arg, rc.arg_type, dialect)
         else:
             assert isinstance(spec, ExpressionColumn) and rc.ast is not None and rc.checked
-            exprs[cid] = ExprCompiler(rc.checked, dialect, binder, field,
-                                      lambda name: exprs[name]).compile(rc.ast)
+            value = ExprCompiler(rc.checked, dialect, binder, field,
+                                 lambda name: exprs[name]).compile(rc.ast)
+            if rc.rollup and not rc.nested:
+                value = aggregate(rc.rollup, value, rc.arg_type, dialect)
+            exprs[cid] = value  # a nested rollup is applied in the outer step
 
-    labels = {c.id: exprs[c.id].label(c.id) for c in plan.columns}
-    stmt = select(*[labels[c.id] for c in plan.columns]).select_from(source)
-
-    def condition(f: ResolvedFilter) -> Expr:
-        target = field(*f.field) if f.field else exprs[f.column_id]  # type: ignore[index]
+    def condition(f: ResolvedFilter, values: dict[str, Expr]) -> Expr:
+        target = field(*f.field) if f.field else values[f.column_id]  # type: ignore[index]
         t = column_type(f.data_type)
         op, v = f.op, f.value
         if op == "is_null":
@@ -161,15 +172,51 @@ def compile_plan(plan: Plan, dialect: Dialect) -> CompiledQuery:
         return {"eq": target == b, "ne": target != b, "gt": target > b, "gte": target >= b,
                 "lt": target < b, "lte": target <= b}[op]
 
+    inner_ids = [c.id for c in plan.columns if c.id not in plan.outer_only]
+    stmt = select(*[exprs[c].label(c) for c in inner_ids]).select_from(source)
     if plan.filters:
-        stmt = stmt.where(and_(*[condition(f) for f in plan.filters]))
+        stmt = stmt.where(and_(*[condition(f, exprs) for f in plan.filters]))
     if plan.group_ids or plan.group_fields:
         stmt = stmt.group_by(*[exprs[g] for g in plan.group_ids],
                              *[field(a, c) for a, c in plan.group_fields])
+
+    values = exprs
+    if plan.two_step:
+        # Step 2: re-aggregate the per-detail-row values by the report's own groups.
+        detail = stmt.subquery("detail")
+        values = {}
+        for cid in plan.eval_order:
+            rc = plan.column(cid)
+            if not rc.aggregate:
+                values[cid] = detail.c[cid]
+            elif rc.nested:
+                assert rc.rollup is not None
+                values[cid] = aggregate(rc.rollup, detail.c[cid], rc.arg_type, dialect)
+            elif cid in plan.outer_only:
+                assert rc.ast is not None and rc.checked is not None
+                values[cid] = ExprCompiler(rc.checked, dialect, binder, _no_field,
+                                           lambda name: values[name]).compile(rc.ast)
+            else:
+                fn = rc.spec.fn if isinstance(rc.spec, AggregateColumn) else rc.rollup
+                assert fn is not None
+                values[cid] = aggregate(REAGGREGATE[fn], detail.c[cid], rc.data_type, dialect)
+        stmt = select(*[values[c.id].label(c.id) for c in plan.columns]).select_from(detail)
+        if plan.group_ids:
+            stmt = stmt.group_by(*[values[g] for g in plan.group_ids])
+
+    labels = {c.id: values[c.id].label(c.id) for c in plan.columns}
     if plan.having:
-        stmt = stmt.having(and_(*[condition(f) for f in plan.having]))
+        stmt = stmt.having(and_(*[condition(f, values) for f in plan.having]))
     for ob in plan.order_by:
-        target = labels[ob.column_id] if ob.column_id else field(*ob.field)  # type: ignore[misc]
+        target: Expr
+        if ob.column_id:
+            target = labels[ob.column_id]
+        elif plan.two_step:  # a grouped field: sort by the column that shows it
+            assert ob.field is not None
+            target = values[_grouped_column(plan, ob.field)]
+        else:
+            assert ob.field is not None
+            target = field(*ob.field)
         stmt = stmt.order_by(target.desc() if ob.dir == "desc" else target.asc())
     if plan.spec.limit is not None:
         if dialect is Dialect.MSSQL:

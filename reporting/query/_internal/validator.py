@@ -36,6 +36,8 @@ from reporting.query.api import (
 
 MAX_IN_VALUES = 1000
 FANOUT_FNS = {"sum", "avg", "count"}
+# Aggregates that can be re-aggregated from per-detail-row values, and how.
+REAGGREGATE = {"sum": "sum", "count": "sum", "min": "min", "max": "max"}
 TYPE_WORD = {
     DataType.INTEGER: "a number", DataType.DECIMAL: "a number", DataType.FLOAT: "a number",
     DataType.TEXT: "text", DataType.BOOLEAN: "true/false", DataType.DATE: "a date",
@@ -64,6 +66,8 @@ class ResolvedColumn:
     arg_type: DataType | None = None
     ast: Node | None = None
     checked: CheckResult | None = None
+    rollup: str | None = None  # expression columns: aggregate applied to the expression
+    nested: bool = False  # rollup of an aggregating expression: computed in two steps
 
     @property
     def id(self) -> str:
@@ -114,6 +118,10 @@ class Plan:
     gap_fill: GapFill | None = None
     # Extra GROUP BY fields: bare columns used beside aggregates in expressions (auto mode).
     group_fields: list[tuple[str, str]] = field(default_factory=list)
+    # Two-step query (a nested rollup): the detail query, then re-aggregated by group_ids.
+    # ``outer_only`` columns are computed in the outer step only.
+    two_step: bool = False
+    outer_only: set[str] = field(default_factory=set)
 
     def column(self, cid: str) -> ResolvedColumn:
         return next(c for c in self.columns if c.id == cid)
@@ -133,6 +141,22 @@ class _Issues:
     @property
     def has_errors(self) -> bool:
         return any(i.severity == "error" for i in self.items)
+
+
+def _aggregate_result(fn: str, arg_type: DataType, arg_desc: str) -> DataType | str:
+    """The result type of ``fn`` over ``arg_type``, or a user message when it doesn't apply."""
+    label = {"sum": "Sum", "avg": "Avg", "min": "Min", "max": "Max"}.get(fn, "Count")
+    if fn in ("sum", "avg") and not arg_type.is_numeric:
+        return f"{label} needs a number; {arg_desc} is {TYPE_WORD[arg_type]}"
+    if fn in ("min", "max") and not arg_type.is_orderable:
+        return f"{label} needs a number, date or text; {arg_desc} is {TYPE_WORD[arg_type]}"
+    if fn in ("count", "count_distinct"):
+        return DataType.INTEGER
+    if fn == "sum":
+        return _numeric_result(arg_type)
+    if fn == "avg":
+        return DataType.FLOAT if arg_type == DataType.FLOAT else DataType.DECIMAL
+    return arg_type
 
 
 def _split_ref(ref: str) -> tuple[str, str]:
@@ -381,8 +405,17 @@ class Validator:
             except ExprError as exc:
                 issues.error(path, f"{cid}: {exc.message}", code="expression")
                 continue
-            resolved[cid] = ResolvedColumn(i, col, checked.data_type, checked.aggregate,
-                                           ast=parsed[cid], checked=checked)
+            if col.rollup is None:
+                resolved[cid] = ResolvedColumn(i, col, checked.data_type, checked.aggregate,
+                                               ast=parsed[cid], checked=checked)
+                continue
+            result = _aggregate_result(col.rollup, checked.data_type, "the expression")
+            if not isinstance(result, DataType):
+                issues.error(f"columns[{i}].rollup", f"{cid}: {result}")
+                continue
+            resolved[cid] = ResolvedColumn(i, col, result, True, arg_type=checked.data_type,
+                                           ast=parsed[cid], checked=checked,
+                                           rollup=col.rollup, nested=checked.aggregate)
 
         if issues.has_errors:
             return None, issues.items
@@ -408,6 +441,9 @@ class Validator:
                     if not c.aggregate and c.id not in group_ids:
                         issues.error(f"columns[{c.index}]",
                                      f"'{c.id}' must be grouped or aggregated")
+
+        two_step = any(c.nested for c in columns)
+        outer_only = self._check_two_step(columns, issues) if two_step else set()
 
         self._check_fanout(spec, columns, joins, issues)
 
@@ -457,7 +493,8 @@ class Validator:
                     filters, having, order_by, output,
                     warnings=[i for i in issues.items if i.severity == "warning"],
                     gap_fill=self._gap_fill(columns, group_ids, filters),
-                    group_fields=self._extra_group_fields(columns, group_ids, aliases))
+                    group_fields=self._extra_group_fields(columns, group_ids, aliases),
+                    two_step=two_step, outer_only=outer_only)
         return plan, issues.items
 
     # -- helpers --------------------------------------------------------------------------
@@ -465,19 +502,23 @@ class Validator:
     @staticmethod
     def _extra_group_fields(columns: list[ResolvedColumn], group_ids: list[str],
                             aliases: dict[str, TableSchema]) -> list[tuple[str, str]]:
-        """Fields to add to GROUP BY for expressions like ``s.total - SUM(p.amount)``,
-        skipping ones already grouped through a plain field column."""
+        """Fields to add to GROUP BY for expressions like ``s.total - SUM(p.amount)``: the
+        bare field plus its table's primary key, so each row of that table (each sale) stays
+        its own group. Fields already grouped through a plain field column are skipped."""
         grouped = {c.spec.ref for c in columns
                    if c.id in group_ids and isinstance(c.spec, FieldColumn)}
-        refs = sorted({ref for c in columns if c.checked is not None
-                       for ref in c.checked.group_fields} - grouped)
-        out: list[tuple[str, str]] = []
-        for ref in refs:
+        out: dict[tuple[str, str], None] = {}
+        for ref in sorted({ref for c in columns if c.checked is not None
+                           for ref in c.checked.group_fields}):
             alias, column = _split_ref(ref)
-            col = aliases[alias].column(column)
+            table = aliases[alias]
+            col = table.column(column)
             assert col is not None
-            out.append((alias, col.name))
-        return out
+            keys = [k.name for k in table.columns if k.primary_key]
+            for name in [*keys, col.name]:
+                if f"{alias}.{name}" not in grouped:
+                    out[(alias, name)] = None
+        return list(out)
 
     @staticmethod
     def _field_problem(aliases: dict[str, TableSchema], access: AccessContext | None,
@@ -521,24 +562,45 @@ class Validator:
             if r is None:
                 return None
             arg_type, arg_desc = r[2], col.arg
-        label = {"sum": "Sum", "avg": "Avg", "min": "Min", "max": "Max"}.get(col.fn, "Count")
-        if col.fn in ("sum", "avg") and not arg_type.is_numeric:
-            issues.error(f"{path}.fn",
-                         f"{label} needs a number; {arg_desc} is {TYPE_WORD[arg_type]}")
+        result = _aggregate_result(col.fn, arg_type, arg_desc)
+        if not isinstance(result, DataType):
+            issues.error(f"{path}.fn", result)
             return None
-        if col.fn in ("min", "max") and not arg_type.is_orderable:
-            issues.error(f"{path}.fn", f"{label} needs a number, date or text; "
-                                       f"{arg_desc} is {TYPE_WORD[arg_type]}")
-            return None
-        if col.fn in ("count", "count_distinct"):
-            result = DataType.INTEGER
-        elif col.fn == "sum":
-            result = _numeric_result(arg_type)
-        elif col.fn == "avg":
-            result = DataType.FLOAT if arg_type == DataType.FLOAT else DataType.DECIMAL
-        else:
-            result = arg_type
         return ResolvedColumn(idx, col, result, aggregate=True, arg_type=arg_type)
+
+    @staticmethod
+    def _check_two_step(columns: list[ResolvedColumn], issues: _Issues) -> set[str]:
+        """With a nested rollup the query runs per detail row first (the report's groups
+        plus the rows' own keys), then re-aggregates. Every other measure must survive that:
+        sums, counts, minimums and maximums re-aggregate; expressions built only from other
+        columns are computed afterwards; anything else needs a rollup of its own."""
+        outer_only: set[str] = set()
+        nested = next(c for c in columns if c.nested)
+        because = f"'{nested.spec.label or nested.id}' is rolled up"
+        for c in columns:
+            if not c.aggregate or c.nested:
+                continue
+            fn = c.spec.fn if isinstance(c.spec, AggregateColumn) else c.rollup
+            if fn is not None:
+                if fn not in REAGGREGATE:
+                    issues.error(f"columns[{c.index}]",
+                                 f"'{c.spec.label or c.id}': {fn.replace('_', ' ')} can't be "
+                                 f"combined with a nested roll-up ({because})")
+                continue
+            assert c.checked is not None
+            if c.checked.fields:
+                issues.error(f"columns[{c.index}].rollup",
+                             f"'{c.spec.label or c.id}' needs a roll-up (Sum, Avg, Min, Max or "
+                             f"Count) because {because}")
+            else:
+                outer_only.add(c.id)  # e.g. [revenue] / [orders]: from the rolled-up values
+        for c in columns:
+            if c.id not in outer_only and c.checked is not None:
+                for name in sorted(c.checked.calc_refs & outer_only):
+                    issues.error(f"columns[{c.index}]",
+                                 f"'{c.spec.label or c.id}' can't use [{name}] here: it is "
+                                 f"computed after the roll-up")
+        return outer_only
 
     @staticmethod
     def _topo_order(spec: QuerySpec, parsed: dict[str, Node], ids: dict[str, int],
@@ -604,6 +666,10 @@ class Validator:
                 refs = [arg] if isinstance(arg, str) else [arg.start, arg.end]
                 measured = [_split_ref(r)[0] for r in refs]
             elif c.ast is not None:
+                if c.rollup in FANOUT_FNS and not c.nested:  # SUM over the whole expression
+                    from reporting.query._internal.expr.ast import FieldRef
+
+                    measured += [f.alias for f in walk(c.ast) if isinstance(f, FieldRef)]
                 for n in walk(c.ast):
                     if isinstance(n, FuncCall) and n.name in ("SUM", "AVG", "COUNT"):
                         from reporting.query._internal.expr.ast import FieldRef
@@ -725,6 +791,8 @@ class Validator:
             label = spec.label or spec.id
         else:
             source, label = spec.expr, spec.label or spec.id
+            if spec.rollup:
+                source = f"{spec.rollup}({source})"
         grain = spec.grain if isinstance(spec, FieldColumn) else None
         if grain:
             source = f"{source} by {grain}"

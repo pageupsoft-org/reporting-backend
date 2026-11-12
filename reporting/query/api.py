@@ -115,6 +115,9 @@ class ExpressionColumn(SpecModel):
     id: ColumnIdStr
     expr: Annotated[str, StringConstraints(min_length=1, max_length=MAX_EXPRESSION_CHARS)]
     label: Label | None = None
+    # Aggregate the expression's values. When the expression itself aggregates (e.g.
+    # ``s.total - SUM(p.amount)``), it is computed per detail row first, then rolled up.
+    rollup: AggregateFn | None = None
 
 
 SpecColumn = Annotated[
